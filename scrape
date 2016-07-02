@@ -1,0 +1,114 @@
+#!/usr/bin/env python
+
+from bs4 import BeautifulSoup
+import urllib2
+import sys
+import re
+from pytz import timezone
+from datetime import datetime
+import uuid
+from elasticsearch import Elasticsearch
+
+def conv_to_epoch(m):
+        year = int(m[6])
+        month = months[m[5]]
+        day = int(m[3])
+        #if m[2] == 'am':
+        #        hour = int(m[0])
+        #else:
+        #        hour = int(m[0]) + 12
+        hour = int(m[0])
+        minute = int(m[1])
+        second = 0
+        microsecond = 0
+        tz = timezone('Asia/Tokyo')
+        d = datetime(year, month, day, hour, minute, second, microsecond, tz)
+        return d
+
+def extract(u):
+        html_page = urllib2.urlopen(u)
+        soup = BeautifulSoup(html_page, "html.parser")
+        d = {'resort': None,
+             'data': {},
+             'when': None,
+             'url': u,
+             'es': {},
+             'mu': None}
+        for div in soup.findAll('div', { "id": "general-info"}):
+                for e in div:
+                        try:
+                                m = re.match("\s*(\d+)\s*:\s*(\d+)(\D+)(\d+)(\w+)\s+(\w+)\s+(\d+)", e.text, re.DOTALL)
+                                if m:
+                                        d['when'] = conv_to_epoch(m.groups())
+                        except AttributeError as e:
+                                pass
+        for div in soup.findAll('div', { "id": "main-report" }):
+                d['data']['report'] = ""
+                for e in div:
+                        try:
+                                d['data']['report'] += e.text
+                        except AttributeError:
+                                pass
+        for div in soup.findAll('div', { "id": "resort-snow-fall"}):
+                for tr in div.findAll('tr'):
+                        td = tr.findAll('td')
+                        if len(td) == 1:
+                                d['resort'] = td[0].text
+                        elif len(td) == 2:
+                                d['data'][td[0].text] = td[1].text
+                        else:
+                                d['mu'] = td
+        for k in d['data']:
+                if re.match("Observed\s+snowfall", k, flags=re.IGNORECASE):
+                        d['new'] = d['data'][k]
+                elif re.match("Official\s+snow\s+depth", k, flags=re.IGNORECASE):
+                        d['depth'] = d['data'][k]
+                elif re.match("Previous\s+day", k, flags=re.IGNORECASE):
+                        d['yesterday'] = d['data'][k]
+        return d
+
+def scrape(u):
+        html_page = urllib2.urlopen(u)
+        soup = BeautifulSoup(html_page, "html.parser")
+        for link in soup.findAll('a'):
+                res = link.get('href')
+                m = re.match("^/japan-daily-snow-weather-reports/([^/]+)/[^/]+", res)
+                if m:
+                        if m.group(1) == "calendar" or m.group(1) == "archive":
+                                continue
+                        moar =  "http://www.snowjapan.com/" + res
+                        print moar
+                        d = extract(moar)
+                        if d['resort']:
+                                t = d['resort']
+                                i = d['when'].isoformat()
+                                d['timestamp'] = d['when']
+                        else:
+                                t = 'nodata'
+                                i = uuid.uuid1().urn
+                                d['timestamp'] = datetime.fromtimestamp(1)
+                        res = es.index(index="snowjapan", doc_type=t, id=i, body=d)
+                        print res
+                        print '-----'
+
+
+es = Elasticsearch()
+years = ['2013', '2014', '2015', '2016']
+months = {
+        'January': 1,
+        'February': 2,
+        'March': 3,
+        'April': 4,
+        'May': 5,
+        'June': 6,
+        'July': 7,
+        'August': 8,
+        'September': 9,
+        'October': 10,
+        'November': 11,
+        'December': 12
+}
+
+for y in ['2013']:
+        for m in ['February']:
+                scrape("http://www.snowjapan.com/japan-daily-snow-weather-reports/calendar/{}-{}".format(m, y))
